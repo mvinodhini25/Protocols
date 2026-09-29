@@ -1,0 +1,373 @@
+// TRANSMITTER
+
+module transmiter #(parameter integer clock = 50000000, baudrate = 115200)
+(
+    input clk,
+    input rst,
+    input tx_start,
+    input [7:0] tx_data,
+    input parity_en,
+    output reg tx,
+    output reg tx_busy
+);
+
+localparam integer t_bit = (clock/baudrate);
+
+reg [2:0] state, next;
+reg [15:0] baudcount; // Increased to 16 bits to prevent overflow
+reg [2:0] bitcount;
+reg [7:0] shift_reg;
+reg parity;
+
+localparam tx_idle = 3'd0, tx__start = 3'd1, tx__data = 3'd2, tx_parity = 3'd3, tx_stop = 3'd4;
+
+always@(posedge clk or posedge rst) begin
+    if(rst)
+        state <= tx_idle;
+    else 
+        state <= next;
+end
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        baudcount <= 0;
+        bitcount  <= 0;
+    end
+    else if (state == tx_idle) begin
+        baudcount <= 0;
+        bitcount <= 0;
+    end
+    else begin
+        if (baudcount == t_bit-1) begin
+            baudcount <= 0;
+            if(state == tx__data) begin
+                if (bitcount < 3'd7)
+                    bitcount <= bitcount + 1;
+            end
+        end
+        else begin
+            baudcount <= baudcount + 1;
+        end  
+    end
+end
+
+always@(posedge clk or posedge rst) begin
+    if(rst)
+        parity <= 0;
+    else if(state == tx_idle && tx_start) begin
+        if(parity_en) begin
+            // Hardcoded strictly to EVEN parity
+            parity <= ^tx_data;
+        end
+        else
+            parity <= 0;
+    end
+end
+
+always@(posedge clk or posedge rst) begin
+    if(rst)
+        shift_reg <= 0;
+    else begin
+        if (state == tx_idle && tx_start)
+            shift_reg <= tx_data;
+        else if (baudcount == t_bit-1 && state == tx__data)
+            shift_reg <= {1'b0, shift_reg[7:1]}; // Safely shifting in a 0 instead of tx_data[0]
+    end	
+end
+
+always@(*) begin
+    case(state)
+        tx_idle: begin
+            tx = 1;
+            tx_busy = 0;
+            if (tx_start)
+                next = tx__start;
+            else
+                next = tx_idle;
+        end
+
+        tx__start: begin
+            tx = 0;
+            tx_busy = 1;
+            if (baudcount == t_bit-1)
+                next = tx__data;
+            else
+                next = tx__start;
+        end
+
+        tx__data: begin
+            tx = shift_reg[0];
+            tx_busy = 1;
+            if (baudcount == t_bit-1) begin
+                if (bitcount == 3'd7) begin
+                    if (parity_en)
+                        next = tx_parity;
+                    else
+                        next = tx_stop;
+                end
+                else begin
+                    next = tx__data;
+                end
+            end
+            else begin
+                next = tx__data;
+            end
+        end
+
+        tx_parity: begin
+            tx = parity;
+            tx_busy = 1;
+            if(baudcount == t_bit-1)
+                next = tx_stop;
+            else
+                next = tx_parity;
+        end
+
+        tx_stop: begin
+            tx = 1;
+            tx_busy = 1;
+            if (baudcount == t_bit-1)
+                next = tx_idle;
+            else
+                next = tx_stop;
+        end
+        
+        default : begin
+            tx = 1;
+            tx_busy = 0;
+            next = tx_idle;
+        end
+    endcase
+end
+
+endmodule
+	
+// RECEIVER
+
+module receiver #(parameter integer clock = 50000000, baudrate = 115200) // Synced default clock with transmitter
+(
+    input clk,
+    input rst,
+    input rx,
+    input parity_en,
+    output reg [7:0] rx_data,
+    output reg rx_valid,
+    output reg rx_error
+);
+
+localparam integer t_bit = clock/baudrate;
+localparam integer half_bit = t_bit/2;
+
+reg [2:0] state, next;
+reg [15:0] baudcount; // Increased to 16 bits
+reg [2:0] bitcount;
+reg [7:0] shift_reg;
+reg parity;
+reg parity_err_flag; // New register to securely latch parity error
+
+parameter rx_idle = 3'd0, rx_start_check = 3'd5, rx__data = 3'd2, rx_parity = 3'd3, rx_stop = 3'd4;
+
+always@(posedge clk or posedge rst) begin
+    if(rst)
+        state <= rx_idle;
+    else 
+        state <= next;
+end
+
+always@(posedge clk or posedge rst) begin
+    if(rst) begin
+        baudcount <= 0;
+        bitcount <= 0;
+    end
+    else if(state == rx_idle) begin
+        baudcount <= 0;
+        bitcount <= 0;
+    end
+    else if(state == rx_start_check) begin
+        if(baudcount == half_bit-1) begin
+            baudcount <= 0;
+        end
+        else
+            baudcount <= baudcount + 1;
+    end
+    else begin
+        if(baudcount == t_bit-1) begin
+            baudcount <= 0;
+            if(state == rx__data) begin
+                if(bitcount < 3'd7)
+                    bitcount <= bitcount + 1;
+            end
+        end
+        else begin
+            baudcount <= baudcount + 1;
+        end
+    end
+end
+
+always@(posedge clk or posedge rst) begin
+    if(rst)
+        parity <= 0;
+    else if(state == rx__data && baudcount == t_bit-1 && bitcount == 3'd7) begin
+        if(parity_en) begin
+            // Hardcoded to EVEN parity, and correctly excluding the garbage bit
+            parity <= ^{rx, shift_reg[7:1]};
+        end
+        else
+            parity <= 0;
+    end
+end
+
+always@(posedge clk or posedge rst) begin
+    if(rst) begin
+        shift_reg <= 0;
+    end
+    else if(state == rx__data && baudcount == t_bit-1) begin
+        shift_reg <= {rx, shift_reg[7:1]};
+    end
+end
+
+// Latch to capture the parity error safely
+always@(posedge clk or posedge rst) begin
+    if (rst)
+        parity_err_flag <= 1'b0;
+    else if (state == rx_parity && baudcount == t_bit-1)
+        parity_err_flag <= (rx != parity);
+end
+
+always@(*) begin
+    next = state;
+    case(state)
+        rx_idle : begin
+            if(rx == 0)
+                next = rx_start_check;
+            else	
+                next = rx_idle;
+        end
+        
+        rx_start_check : begin
+            if(baudcount == half_bit-1) begin
+                if(rx == 0)
+                    next = rx__data;
+                else 
+                    next = rx_idle;
+            end
+            else
+                next = rx_start_check;
+        end
+        
+        rx__data : begin
+            if(baudcount == t_bit-1) begin
+                if (bitcount == 3'd7) begin
+                    if(parity_en)
+                        next = rx_parity;
+                    else
+                        next = rx_stop;
+                end
+                else begin
+                    next = rx__data;
+                end
+            end
+            else begin
+                next = rx__data;
+            end
+        end
+
+        rx_parity : begin
+            if(baudcount == t_bit-1) begin
+                next = rx_stop;
+            end
+            else
+                next = rx_parity;
+        end
+        
+        rx_stop: begin
+            if (baudcount == t_bit-1) begin
+                if (rx == 1'b1) 
+                    next = rx_idle;
+                else 
+                    next = rx_stop;
+            end
+            else
+                next = rx_stop;
+        end
+        
+        default : begin 
+            next = rx_idle;
+        end
+    endcase
+end
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        rx_data  <= 8'd0;
+        rx_valid <= 1'b0;
+        rx_error <= 1'b0;
+    end
+    else begin
+        if (state == rx_stop && baudcount == t_bit-1) begin
+            if (rx == 1'b1) begin
+                rx_data  <= shift_reg;
+                rx_valid <= 1'b1;
+                // Safely assign the latched flag if parity is enabled
+                rx_error <= parity_en ? parity_err_flag : 1'b0; 
+            end
+            else begin
+                rx_error <= 1'b1; // Framing error
+                rx_valid <= 1'b0;
+            end
+        end
+        else begin
+            rx_valid <= 1'b0; // This guarantees valid only pulses for a single clock cycle!
+        end
+    end
+end
+endmodule 
+
+// TOP MODULE
+
+module uart #(parameter integer clock = 50000000, baudrate = 115200)
+(
+    input clk,
+    input rst,
+    input uart_rx,
+    output uart_tx,
+    
+    // transmitter
+    input [7:0] tx_data,
+    input tx_start,
+    input parity_en,
+    output tx_busy,
+    
+    // receiver
+    output [7:0] rx_data,
+    output rx_valid,
+    output rx_error
+);
+
+wire tx_internal;
+
+transmiter #(.clock(clock), .baudrate(baudrate))
+uart_tx1(
+    .clk(clk),
+    .rst(rst),
+    .tx_data(tx_data),
+    .tx_start(tx_start),
+    .parity_en(parity_en),
+    .tx(tx_internal),
+    .tx_busy(tx_busy)
+);
+	
+receiver #(.clock(clock), .baudrate(baudrate))
+uart_rx1(
+    .clk(clk),
+    .rst(rst),
+    .rx(uart_rx),
+    .parity_en(parity_en),
+    .rx_data(rx_data),
+    .rx_valid(rx_valid),
+    .rx_error(rx_error)
+);
+
+assign uart_tx = tx_internal;
+
+endmodule

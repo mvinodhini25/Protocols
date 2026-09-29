@@ -1,0 +1,14 @@
+## This file contains only the mapped pins required for the UART loopback project
+## EDGE Artix 7 board
+
+# Clock signal (50 MHz)
+set_property -dict { PACKAGE_PIN N11    IOSTANDARD LVCMOS33 } [get_ports { clk }];
+ 
+# Reset Switch (Using Switch 0 as the active-high reset)
+set_property -dict { PACKAGE_PIN L5    IOSTANDARD LVCMOS33 } [get_ports { rst }];
+ 
+# USB UART Pins
+# Depending on your exact board's labeling, TXD and RXD might be swapped. 
+# If it doesn't work initially, try swapping the package pins C4 and D4 here.
+set_property -dict { PACKAGE_PIN C4 IOSTANDARD LVCMOS33 } [get_ports {usb_uart_txd}];
+set_property -dict { PACKAGE_PIN D4 IOSTANDARD LVCMOS33 } [get_ports {usb_uart_rxd}];
